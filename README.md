@@ -1,8 +1,23 @@
 # ScoreNest
 
-A Flat.io-style sheet music web app that runs as a **Cloudflare Worker** (static assets + API), with every file stored in **Cloudflare R2**.
+A Soundslice-style interactive sheet music app — notation synced to real recordings, with practice tools, an editor and AI transcription — that runs as a **Cloudflare Worker** (static assets + API), with every file stored in **Cloudflare R2**.
 
 ## Features
+
+**Recordings synced with the notation (like Soundslice)**
+- Attach recordings to any score: upload MP3 / M4A / WAV / OGG, or MP4 / WebM video (up to 95 MB), or paste a YouTube link. You can attach several per score, e.g. full choir, soprano guide, or a live video
+- **Sync tool:** play the recording and tap **T** at the start of each bar. You can undo, restart from any bar, or mark the end (for a steady tempo, a start tap plus "Mark end" is enough)
+- During playback the cursor and the highlighted notes follow the recording, including repeats. Video and YouTube play above the score
+
+**Practice tools**
+- Click any note to jump to that moment in the recording or the computer playback
+- Shift+click a second note to **loop** that passage (L turns looping on and off)
+- **Slow down** from 25% to 150% without changing the pitch. Use [ and ] to step the speed
+- Computer playback with a **parts mixer** (solo or mute Soprano, Alto, Tenor, Bass…) and a **metronome** with a one-bar count-in
+- **On-screen keyboard** lights up the notes as they play
+- Space plays and pauses
+- Share links open the same player with the synced recordings, so students and choir members can practise from one link
+
 
 **Library**
 - Grid or list view with live score previews, search, and sorting (last modified, created, title, composer)
@@ -24,7 +39,6 @@ A Flat.io-style sheet music web app that runs as a **Cloudflare Worker** (static
 - Edit on the score: click a note, then use ↑/↓ (or drag) to change pitch, A–G to set the pitch, 1–6 to set the duration, Delete to make a rest, and + / − for sharp / flat
 - Palette: note values, rests, accidentals, octave up/down, bar lines, repeats, ties, slurs, triplets, fermata, accents, dynamics, crescendo, chord symbols, lyrics, and text
 - On-screen piano (with sound) and **MIDI keyboard input** (Chrome / Edge)
-- Playback with a moving cursor, note highlighting, tempo control and looping
 - Transpose by half steps (key signature, notes and chord symbols all change)
 - Templates: melody, lead sheet, piano, SATB choir, SATB + piano
 - Autosave. Ctrl/⌘+S saves a named version. Version history with preview and restore (a version is also kept automatically every 15 minutes)
@@ -45,6 +59,7 @@ public/                 static front end (no build step)
   css/app.css
   js/app.js             router, library, import, new score
   js/score.js           editor, viewers, public share page
+  js/player.js          practice player: recordings, sync, loop, speed, mixer, keyboard
   js/transcribe.js      PDF/image → AI transcription (streams live)
   js/abc.js             notation helpers + templates
   js/lib.js, share.js   helpers
@@ -63,6 +78,8 @@ test/                   API tests with an in-memory R2 (npm test)
 | `scores/{id}/source` | the original PDF / image |
 | `scores/{id}/thumb.svg` | library preview |
 | `scores/{id}/v/{time}` | saved versions (the newest 50 are kept) |
+| `scores/{id}/recordings.json` | recordings list + sync points |
+| `scores/{id}/rec/{rid}` | uploaded audio / video (streamed with seeking support) |
 | `folders.json` | folders |
 
 ## Deploy: GitHub → Cloudflare Worker (recommended)

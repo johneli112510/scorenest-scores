@@ -82,6 +82,30 @@ assert.equal(r.status, 200); assert.match(r.data, /text_delta/);
 assert.equal(sent.url, 'https://api.anthropic.com/v1/messages'); assert.equal(sent.body.stream, true); assert.equal(sent.body.messages[0].content[0].type, 'image');
 assert.match(sent.body.messages[0].content[1].text, /page 2/); assert.equal(sent.headers['x-api-key'], 'k');
 
+// recordings
+const audio = new Uint8Array(1000).map((_, i) => i % 256);
+r = await call('POST', `scores/${id}/recordings`, audio, { 'content-type': 'audio/mpeg', 'x-filename': encodeURIComponent('Full choir.mp3') });
+assert.equal(r.status, 201); const rid = r.data.id; assert.equal(r.data.name, 'Full choir'); assert.equal(r.data.size, 1000);
+r = await call('POST', `scores/${id}/recordings`, new Uint8Array([1]), { 'content-type': 'application/pdf' }); assert.equal(r.status, 400);
+r = await call('POST', `scores/${id}/recordings`, { youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10', name: 'Live' }); assert.equal(r.data.youtube, 'dQw4w9WgXcQ');
+r = await call('POST', `scores/${id}/recordings`, { youtube: 'https://youtu.be/abc' }); assert.equal(r.status, 400);
+r = await call('GET', `scores/${id}/recordings/${rid}/file`, undefined, { range: 'bytes=10-19' });
+assert.equal(r.status, 206); assert.equal(r.headers.get('content-range'), 'bytes 10-19/1000'); assert.equal(r.headers.get('content-length'), '10');
+r = await call('GET', `scores/${id}/recordings/${rid}/file`); assert.equal(r.status, 200); assert.equal(r.headers.get('accept-ranges'), 'bytes');
+r = await call('GET', `scores/${id}/recordings/${rid}/file`, undefined, { range: 'bytes=5000-' }); assert.equal(r.status, 416);
+r = await call('PATCH', `scores/${id}/recordings/${rid}`, { sync: { anchors: [{ bar: 0, t: 1.2345 }, { bar: 4, t: 9.5 }, { bar: -1, t: 3 }, { bar: 2, t: 'x' }] } });
+assert.deepEqual(r.data.sync.anchors, [{ bar: 0, t: 1.235 }, { bar: 4, t: 9.5 }]);
+r = await call('GET', 'scores'); assert.equal(r.data.find((s) => s.id === id).recCount, 2);
+{ const saved2 = cookie; cookie = '';
+  r = await call('GET', `public/${id}/recordings`); assert.equal(r.data.length, 2); assert.equal(r.data[0].size, undefined);
+  r = await call('GET', `public/${id}/recordings/${rid}`, undefined, { range: 'bytes=0-1' }); assert.equal(r.status, 206);
+  cookie = saved2; }
+r = await call('POST', `scores/${id}/duplicate`); const copyId = r.data.id;
+r = await call('GET', `scores/${copyId}/recordings`); assert.equal(r.data.length, 2);
+r = await call('GET', `scores/${copyId}/recordings/${rid}/file`); assert.equal(r.status, 200);
+r = await call('DELETE', `scores/${id}/recordings/${rid}`); assert.equal(r.status, 200);
+r = await call('GET', `scores/${id}/recordings`); assert.equal(r.data.length, 1);
+
 // trash + delete
 await call('PUT', `scores/${dup}`, { trashed: true });
 r = await call('GET', 'scores'); assert.equal(r.data.find((s) => s.id === dup).trashed, true);

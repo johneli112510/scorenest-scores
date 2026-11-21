@@ -11,9 +11,14 @@ export class MockR2 {
     else throw new Error('unsupported put value');
     this.store.set(key, { bytes, httpMetadata: opts.httpMetadata || {}, customMetadata: opts.customMetadata || {} });
   }
-  async get(key) {
+  async head(key) {
     const o = this.store.get(key); if (!o) return null;
-    const bytes = o.bytes;
+    return { key, size: o.bytes.length, httpMetadata: o.httpMetadata, customMetadata: o.customMetadata };
+  }
+  async get(key, opts = {}) {
+    const o = this.store.get(key); if (!o) return null;
+    let bytes = o.bytes;
+    if (opts.range) bytes = bytes.slice(opts.range.offset, opts.range.offset + opts.range.length);
     return {
       key, size: bytes.length, httpMetadata: o.httpMetadata, customMetadata: o.customMetadata, httpEtag: '"e"',
       get body() { return new Response(bytes).body; },

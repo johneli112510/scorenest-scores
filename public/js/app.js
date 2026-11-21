@@ -160,6 +160,7 @@ function scoreCard(s, ctx, redraw) {
   const badges = h('div', { class: 'badges' },
     h('span', { class: `badge badge-${s.type}` }, typeLabel[s.type] || s.type),
     s.transcribed ? h('span', { class: 'badge badge-ai', title: 'Transcribed with AI' }, 'AI') : null,
+    s.recCount ? h('span', { class: 'badge badge-rec', title: `${s.recCount} recording(s)` }, `♪ ${s.recCount}`) : null,
     s.public ? h('span', { class: 'badge badge-shared', html: icon('globe', 12), title: 'Shared with link' }) : null);
   const Link = (attrs, ...c) => (href ? h('a', { href, ...attrs }, ...c) : h('div', attrs, ...c));
   return h('article', { class: `card ${s.trashed ? 'is-trashed' : ''}` },

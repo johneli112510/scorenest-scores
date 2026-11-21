@@ -4,6 +4,7 @@ import { api, h, $, $$, modal, toast, download, safeName, debounce, timeAgo, ico
 import { headerField, durationSuffix, midiToAbc, shiftPitch, setPitchLetter, setDuration, toRest, toggleAccidental } from './abc.js';
 import { openTranscribe, thumbFromFile } from './transcribe.js';
 import { shareModal } from './share.js';
+import { createPlayer } from './player.js';
 
 const ABCJS = () => window.ABCJS;
 
@@ -158,7 +159,6 @@ function abcEditor(root, meta, initial, publicMode) {
 
   // --- elements
   const paper = h('div', { class: 'paper', id: 'paper' });
-  const audioEl = h('div', { id: 'audio-controls', class: 'audio-controls' });
   const code = h('textarea', { class: 'code', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', 'aria-label': 'ABC notation' });
   code.value = text;
   const warnings = h('div', { class: 'warnings' });
@@ -183,42 +183,13 @@ function abcEditor(root, meta, initial, publicMode) {
   const saveMeta = (patch) => api(`scores/${meta.id}`, { method: 'PUT', body: patch }).then((m) => { Object.assign(meta, m); document.title = `${meta.title} · ScoreNest`; }).catch((e) => toast(e.message, 'error'));
 
   // --- rendering
-  let synthControl = null;
-  const cursorControl = {
-    onStart() {
-      const svg = paper.querySelector('svg');
-      if (svg && !svg.querySelector('.abcjs-cursor')) {
-        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        line.setAttribute('class', 'abcjs-cursor');
-        svg.appendChild(line);
-      }
-    },
-    onEvent(ev) {
-      if (ev.measureStart && ev.left === null) return;
-      $$('.abcjs-playing', paper).forEach((e) => e.classList.remove('abcjs-playing'));
-      for (const group of ev.elements || []) for (const el of group) el.classList.add('abcjs-playing');
-      const cursor = paper.querySelector('.abcjs-cursor');
-      if (cursor) {
-        cursor.setAttribute('x1', ev.left - 2); cursor.setAttribute('x2', ev.left - 2);
-        cursor.setAttribute('y1', ev.top); cursor.setAttribute('y2', ev.top + ev.height);
-      }
-      const first = ev.elements?.[0]?.[0];
-      if (first) {
-        const r = first.getBoundingClientRect(), wrap = paper.parentElement.getBoundingClientRect();
-        if (r.top < wrap.top + 40 || r.bottom > wrap.bottom - 40) first.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      }
-    },
-    onFinished() {
-      $$('.abcjs-playing', paper).forEach((e) => e.classList.remove('abcjs-playing'));
-      paper.querySelector('.abcjs-cursor')?.remove();
-    },
-  };
+  let player = null; // created once the page is built
 
   function render() {
     if (!ABCJS()) { paper.textContent = 'Notation engine failed to load. Check your connection and reload.'; return; }
     tunes = ABCJS().renderAbc(paper, text, {
       responsive: 'resize', add_classes: true, scale: zoom, staffwidth: 760,
-      clickListener: readOnly ? undefined : onScoreClick, dragging: !readOnly, selectionColor: '#3056d3',
+      clickListener: onScoreClick, dragging: !readOnly, selectionColor: '#3056d3',
       wrap: { minSpacing: 1.8, maxSpacing: 2.7, preferredMeasuresPerLine: 4 },
       oneSvgPerLine: false, foregroundColor: '#14161f',
     });
@@ -226,18 +197,9 @@ function abcEditor(root, meta, initial, publicMode) {
     warnings.innerHTML = '';
     if (w.length) warnings.append(h('div', { class: 'warn-head' }, `${w.length} notation issue${w.length > 1 ? 's' : ''}`), ...w.map((x) => h('div', { class: 'warn', html: x })));
     if (selection && tunes[0]?.engraver?.rangeHighlight) { try { tunes[0].engraver.rangeHighlight(selection.start, selection.end); } catch { /* ignore */ } }
-    loadAudio();
+    player?.onRender();
   }
   const renderSoon = debounce(render, 250);
-
-  function loadAudio() {
-    if (!tunes?.[0] || !ABCJS().synth.supportsAudio()) { audioEl.textContent = 'Audio playback is not supported in this browser.'; return; }
-    if (!synthControl) {
-      synthControl = new (ABCJS().synth.SynthController)();
-      synthControl.load(audioEl, cursorControl, { displayLoop: true, displayRestart: true, displayPlay: true, displayProgress: true, displayWarp: true });
-    }
-    synthControl.setTune(tunes[0], false, { chordsOff: false }).catch(() => { /* fine until user presses play */ });
-  }
 
   // --- text editing helpers
   function setText(next, sel) {
@@ -266,32 +228,31 @@ function abcEditor(root, meta, initial, publicMode) {
     return true;
   };
 
-  function onScoreClick(abcElem, tuneNumber, classes, analysis, drag) {
+  function onScoreClick(abcElem, tuneNumber, classes, analysis, drag, ev) {
     if (abcElem.startChar == null || abcElem.endChar == null) return;
-    selection = { start: abcElem.startChar, end: abcElem.endChar };
-    // trim trailing whitespace in the selected token
-    while (selection.end > selection.start && /\s/.test(text[selection.end - 1])) selection.end--;
-    if (drag?.step && abcElem.el_type === 'note') {
+    if (drag?.step && abcElem.el_type === 'note' && !readOnly) {
+      selection = { start: abcElem.startChar, end: abcElem.endChar };
+      while (selection.end > selection.start && /\s/.test(text[selection.end - 1])) selection.end--;
       editSelected((t) => shiftPitch(t, -drag.step));
-    } else if (window.innerWidth > 900) {
+      return;
+    }
+    player?.onNoteClick(abcElem, ev);
+    if (readOnly) return;
+    selection = { start: abcElem.startChar, end: abcElem.endChar };
+    while (selection.end > selection.start && /\s/.test(text[selection.end - 1])) selection.end--;
+    if (window.innerWidth > 900) {
       code.setSelectionRange(selection.start, selection.end);
       const lineNo = text.slice(0, selection.start).split('\n').length;
       code.scrollTop = Math.max(0, (lineNo - 4) * parseFloat(getComputedStyle(code).lineHeight || 20));
-    }
-    if (abcElem.pitches?.[0] && ABCJS().synth.playEvent) {
-      try {
-        const pitches = abcElem.midiPitches || [];
-        if (pitches.length) ABCJS().synth.playEvent(pitches, abcElem.midiGraceNotePitches, 1000).catch(() => {});
-      } catch { /* ignore */ }
     }
   }
 
   // Keyboard editing on the score (Flat-style): arrows move pitch, letters set pitch, Delete -> rest, 1-6 durations.
   const DUR_KEYS = { 1: [1, 16], 2: [1, 8], 3: [1, 4], 4: [1, 2], 5: [1, 1], 6: [3, 8] };
   function onKey(e) {
+    if (player?.handleKey(e)) return;
     if (readOnly) return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); autosave.cancel(); persist(true); return; }
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); $('.abcjs-midi-start', audioEl)?.click(); return; }
     if (document.activeElement === code || /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) return;
     if (!selection) return;
     const k = e.key;
@@ -456,8 +417,7 @@ function abcEditor(root, meta, initial, publicMode) {
         download(new Blob([midi[0]], { type: 'audio/midi' }), `${safeName(meta.title)}.mid`);
       }],
       ['Audio (.wav)', async () => {
-        if (!synthControl) return;
-        try { toast('Preparing audio…', 'info', 1500); await synthControl.setTune(tunes[0], true); synthControl.download(`${safeName(meta.title)}.wav`); }
+        try { toast('Preparing audio…', 'info', 1500); await player.exportWav(`${safeName(meta.title)}.wav`); }
         catch (e) { toast(`Audio export failed: ${e.message || e}`, 'error'); }
       }],
       ['SVG image', () => download(serializeSvg(paper.querySelector('svg')), `${safeName(meta.title)}.svg`, 'image/svg+xml')],
@@ -467,8 +427,8 @@ function abcEditor(root, meta, initial, publicMode) {
   ];
 
   const toolbar = h('div', { class: 'ed-toolbar' },
-    layoutBtn, audioEl,
-    h('div', { class: 'tool-group' }, h('span', { class: 'tool-label' }, 'Transpose'),
+    layoutBtn,
+    h('div', { class: 'tool-group transpose-group' }, h('span', { class: 'tool-label' }, 'Transpose'),
       readOnly ? null : h('button', { class: 'pal-btn', title: 'Down a half step', onclick: () => transpose(-1) }, '−½'),
       readOnly ? null : h('button', { class: 'pal-btn', title: 'Up a half step', onclick: () => transpose(1) }, '+½')),
     h('div', { class: 'tool-group' }, h('span', { class: 'tool-label' }, 'Zoom'),
@@ -483,15 +443,19 @@ function abcEditor(root, meta, initial, publicMode) {
   // Transposition in the public view only changes what's shown (doesn't save).
   if (readOnly) {
     const [down, up] = [h('button', { class: 'pal-btn', onclick: () => { text = ABCJS().strTranspose(text, tunes, -1); render(); } }, '−½'), h('button', { class: 'pal-btn', onclick: () => { text = ABCJS().strTranspose(text, tunes, 1); render(); } }, '+½')];
-    toolbar.children[1].append(down, up);
+    toolbar.querySelector('.transpose-group').append(down, up);
   }
 
   root.innerHTML = '';
+  player = createPlayer({ meta, publicMode, paper, getTune: () => tunes?.[0], getText: () => text });
+  const hint = readOnly
+    ? 'Click a note to jump there · Shift+click a second note to loop · Space plays · [ ] change speed'
+    : 'Click a note to select & jump there · Shift+click to loop · ↑/↓ or drag to change pitch · A–G pitch · 1–6 duration · Del = rest · Space plays · Ctrl/⌘+S saves a version';
   root.append(h('div', { class: `editor ${readOnly ? 'readonly code-hidden' : ''}` },
     topBar({ meta, publicMode, onTitle: saveMeta, extra }),
     toolbar,
-    h('div', { class: 'ed-main' }, left, h('section', { class: 'ed-score' }, h('div', { class: 'paper-wrap' }, paper), readOnly ? null : h('div', { class: 'hint' }, 'Click a note to select it · ↑/↓ or drag to change pitch · A–G set pitch · 1–6 duration · Del makes a rest · Ctrl/⌘+S saves a version'))),
-    palette));
+    h('div', { class: 'ed-main' }, left, h('section', { class: 'ed-score' }, player.mediaPane, h('div', { class: 'paper-wrap' }, paper), h('div', { class: 'hint' }, hint))),
+    h('div', { class: 'ed-bottom' }, player.keyboard, player.syncBar, player.transport, palette)));
 
   if (!readOnly && window.innerWidth < 900) root.querySelector('.editor').classList.add('code-hidden');
   render();
@@ -504,7 +468,7 @@ function abcEditor(root, meta, initial, publicMode) {
   return () => {
     document.removeEventListener('keydown', onKey);
     window.removeEventListener('beforeunload', beforeUnload);
-    try { synthControl?.pause(); } catch { /* ignore */ }
+    try { player?.destroy(); } catch { /* ignore */ }
     if (midiAccess) midiAccess.inputs.forEach((i) => { i.onmidimessage = null; });
     if (dirty && !saving) { autosave.cancel(); persist(false); }
     if (!readOnly) uploadThumb(meta.id, paper.querySelector('svg'));

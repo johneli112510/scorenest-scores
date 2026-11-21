@@ -137,6 +137,62 @@ async function putFolders(env, folders) {
   return folders;
 }
 
+
+// ---------- recordings (audio / video files, YouTube links) + sync points ----------
+// scores/{id}/recordings.json  -> [{ id, name, kind: 'file'|'youtube', mime, size, youtube, created, sync: { anchors: [{ bar, t }] } }]
+// scores/{id}/rec/{rid}        -> the uploaded media file
+const MAX_RECORDINGS = 20;
+async function getRecordings(env, id) {
+  const o = await env.SCORES.get(`scores/${id}/recordings.json`);
+  return o ? o.json() : [];
+}
+async function putRecordings(env, meta, list) {
+  await env.SCORES.put(`scores/${meta.id}/recordings.json`, JSON.stringify(list), { httpMetadata: { contentType: 'application/json' } });
+  if (meta.recCount !== list.length) { meta.recCount = list.length; await putMeta(env, meta); }
+  return list;
+}
+function youtubeId(input) {
+  const s = String(input || '').trim();
+  if (/^[\w-]{11}$/.test(s)) return s;
+  const m = s.match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/)|youtu\.be\/)([\w-]{11})/);
+  return m ? m[1] : null;
+}
+function cleanAnchors(anchors) {
+  if (!Array.isArray(anchors)) return [];
+  return anchors
+    .filter((a) => a && Number.isInteger(a.bar) && a.bar >= 0 && a.bar < 100000 && Number.isFinite(a.t) && a.t >= 0)
+    .slice(0, 5000)
+    .map((a) => ({ bar: a.bar, t: Math.round(a.t * 1000) / 1000 }));
+}
+// Stream a media file with HTTP Range support so browsers can seek.
+async function mediaResponse(env, request, key, fallbackType) {
+  const head = await env.SCORES.head(key);
+  if (!head) return err('Recording not found', 404);
+  const size = head.size;
+  const range = request.headers.get('range');
+  let opts = {};
+  let start = 0, end = size - 1, partial = false;
+  const m = range && range.match(/^bytes=(\d*)-(\d*)$/);
+  if (m && size > 0) {
+    if (m[1] === '' && m[2] !== '') { start = Math.max(0, size - Number(m[2])); }
+    else { start = Number(m[1] || 0); if (m[2] !== '') end = Math.min(size - 1, Number(m[2])); }
+    if (start > end || start >= size) return new Response(null, { status: 416, headers: { 'content-range': `bytes */${size}` } });
+    partial = true;
+    opts = { range: { offset: start, length: end - start + 1 } };
+  }
+  const obj = await env.SCORES.get(key, opts);
+  if (!obj) return err('Recording not found', 404);
+  const headers = new Headers();
+  headers.set('content-type', head.httpMetadata?.contentType || fallbackType || 'application/octet-stream');
+  headers.set('accept-ranges', 'bytes');
+  headers.set('cache-control', 'private, max-age=3600');
+  headers.set('x-content-type-options', 'nosniff');
+  headers.set('content-length', String(end - start + 1));
+  if (partial) headers.set('content-range', `bytes ${start}-${end}/${size}`);
+  return new Response(obj.body, { status: partial ? 206 : 200, headers });
+}
+const publicRecording = (r) => ({ id: r.id, name: r.name, kind: r.kind, mime: r.mime, youtube: r.youtube, sync: r.sync });
+
 // ---------- AI transcription (Claude vision) ----------
 const ABC_RULES = `Output rules:
 - Output ONLY valid ABC notation (standard 2.1). No commentary, no markdown, no code fences.
@@ -251,6 +307,12 @@ export async function onRequest(context) {
         const o = await env.SCORES.get(`scores/${id}/content`);
         return o ? objectResponse(o, CONTENT_TYPES[meta.type]) : err('Not found', 404);
       }
+      if (sub === 'recordings' && method === 'GET') {
+        const list = await getRecordings(env, id);
+        if (!subId) return json(list.map(publicRecording));
+        const rec = list.find((r) => r.id === subId && r.kind === 'file');
+        return rec ? mediaResponse(env, request, `scores/${id}/rec/${rec.id}`, rec.mime) : err('Not found', 404);
+      }
       return err('Not found', 404);
     }
 
@@ -353,6 +415,12 @@ export async function onRequest(context) {
     if (sub === 'duplicate' && method === 'POST') {
       const now = Date.now();
       const copy = { ...meta, id: newId(), title: `${meta.title} (copy)`, created: now, updated: now, public: false, starred: false, lastSnap: 0 };
+      const recs = await getRecordings(env, id);
+      for (const r of recs.filter((x) => x.kind === 'file')) {
+        const o = await env.SCORES.get(`scores/${id}/rec/${r.id}`);
+        if (o) await env.SCORES.put(`scores/${copy.id}/rec/${r.id}`, o.body, { httpMetadata: o.httpMetadata });
+      }
+      if (recs.length) await env.SCORES.put(`scores/${copy.id}/recordings.json`, JSON.stringify(recs), { httpMetadata: { contentType: 'application/json' } });
       for (const key of ['content', 'source', 'thumb.svg']) {
         const o = await env.SCORES.get(`scores/${id}/${key}`);
         if (o) await env.SCORES.put(`scores/${copy.id}/${key}`, o.body, { httpMetadata: o.httpMetadata, customMetadata: o.customMetadata });
@@ -407,6 +475,50 @@ export async function onRequest(context) {
         if (!meta.thumb) { meta.thumb = true; await putMeta(env, meta); }
         return json({ ok: true });
       }
+    }
+
+    if (sub === 'recordings') {
+      const list = await getRecordings(env, id);
+      if (!subId && method === 'GET') return json(list);
+      if (!subId && method === 'POST') {
+        if (list.length >= MAX_RECORDINGS) return err(`A score can have up to ${MAX_RECORDINGS} recordings`);
+        const ct = request.headers.get('content-type') || '';
+        const rec = { id: newId(), created: Date.now(), sync: { anchors: [] } };
+        if (ct.includes('application/json')) {
+          const body = await readJson(request);
+          const yt = youtubeId(body.youtube);
+          if (!yt) return err('That doesn\'t look like a YouTube link');
+          Object.assign(rec, { kind: 'youtube', youtube: yt, name: clip(body.name || 'YouTube video', 120) });
+        } else {
+          if (!/^(audio|video)\//.test(ct)) return err('Upload an audio or video file (MP3, M4A, WAV, OGG, MP4, WebM)');
+          const name = clip(decodeURIComponent(request.headers.get('x-filename') || 'Recording'), 120).replace(/\.[^.]+$/, '');
+          await env.SCORES.put(`scores/${id}/rec/${rec.id}`, request.body, { httpMetadata: { contentType: ct } });
+          const head = await env.SCORES.head(`scores/${id}/rec/${rec.id}`);
+          Object.assign(rec, { kind: 'file', mime: ct, size: head?.size || 0, name });
+        }
+        list.push(rec);
+        await putRecordings(env, meta, list);
+        return json(rec, 201);
+      }
+      const rec = list.find((r) => r.id === subId);
+      if (!rec) return err('Recording not found', 404);
+      if (parts[4] === 'file' && method === 'GET') {
+        if (rec.kind !== 'file') return err('Not a file', 404);
+        return mediaResponse(env, request, `scores/${id}/rec/${rec.id}`, rec.mime);
+      }
+      if (method === 'PATCH' || method === 'PUT') {
+        const body = await readJson(request);
+        if (typeof body.name === 'string' && body.name.trim()) rec.name = clip(body.name.trim(), 120);
+        if (body.sync && typeof body.sync === 'object') rec.sync = { anchors: cleanAnchors(body.sync.anchors) };
+        await putRecordings(env, meta, list);
+        return json(rec);
+      }
+      if (method === 'DELETE') {
+        await env.SCORES.delete(`scores/${id}/rec/${rec.id}`);
+        await putRecordings(env, meta, list.filter((r) => r.id !== rec.id));
+        return json({ ok: true });
+      }
+      return err('Method not allowed', 405);
     }
 
     if (sub === 'versions') {
