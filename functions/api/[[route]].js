@@ -175,7 +175,7 @@ async function transcribe(request, env) {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-api-key': env.ANTHROPIC_API_KEY,
+      'x-api-key': String(env.ANTHROPIC_API_KEY).trim().replace(/^["']|["']$/g, ''),
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
@@ -188,6 +188,9 @@ async function transcribe(request, env) {
   });
   if (!upstream.ok) {
     const detail = await upstream.text();
+    if (upstream.status === 401) return err('The Anthropic API key was rejected. In Cloudflare, re-enter the ANTHROPIC_API_KEY secret with a valid key from console.anthropic.com (it starts with sk-ant-).', 502);
+    if (upstream.status === 400 && /credit balance/i.test(detail)) return err('Your Anthropic account has no credits left. Add credits at console.anthropic.com → Billing.', 502);
+    if (upstream.status === 404 && /model/i.test(detail)) return err('The AI model name is not available on your account. Change CLAUDE_MODEL in wrangler.toml.', 502);
     return err(`AI service error (${upstream.status}): ${detail.slice(0, 400)}`, 502);
   }
   // Stream the server-sent events straight through to the browser so the user sees notes appear live.
