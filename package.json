@@ -5,8 +5,8 @@
   "type": "module",
   "description": "Sheet music library, notation editor and AI transcription on Cloudflare Pages + R2",
   "scripts": {
-    "dev": "wrangler pages dev",
-    "deploy": "wrangler pages deploy",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
     "create-bucket": "wrangler r2 bucket create scorenest-scores",
     "test": "node test/api.test.mjs && node test/abc.test.mjs"
   },

@@ -1,6 +1,6 @@
 # ScoreNest
 
-A Flat.io-style sheet music web app that runs on **Cloudflare Pages + Pages Functions**, with every file stored in **Cloudflare R2**.
+A Flat.io-style sheet music web app that runs as a **Cloudflare Worker** (static assets + API), with every file stored in **Cloudflare R2**.
 
 ## Features
 
@@ -48,7 +48,8 @@ public/                 static front end (no build step)
   js/transcribe.js      PDF/image → AI transcription (streams live)
   js/abc.js             notation helpers + templates
   js/lib.js, share.js   helpers
-functions/api/[[route]].js   the whole REST API (Pages Function)
+src/worker.js           Worker entry: /api/* → API, everything else → public/
+functions/api/[[route]].js   the whole REST API
 wrangler.toml           R2 binding + settings
 test/                   API tests with an in-memory R2 (npm test)
 ```
@@ -64,37 +65,26 @@ test/                   API tests with an in-memory R2 (npm test)
 | `scores/{id}/v/{time}` | saved versions (the newest 50 are kept) |
 | `folders.json` | folders |
 
-## Deploy: GitHub → Cloudflare (recommended)
+## Deploy: GitHub → Cloudflare Worker (recommended)
 
-1. **Put the code on GitHub.** Create a new repository (for example `scorenest`) and upload the contents of this folder. On github.com: *Add file → Upload files*, then drag in everything inside the folder. Or with git:
-   ```bash
-   git init && git add . && git commit -m "ScoreNest"
-   git branch -M main
-   git remote add origin https://github.com/<you>/scorenest.git
-   git push -u origin main
-   ```
-2. **Create the R2 bucket.** In the Cloudflare dashboard, go to **R2 Object Storage → Create bucket** and name it `scorenest-scores`.
-3. **Create the Pages project.** Go to **Workers & Pages → Create → Pages → Connect to Git** and pick the repo. Use these build settings:
-   - Framework preset: **None**
-   - Build command: *(leave empty)*
-   - Build output directory: **`public`**
-4. **Check the R2 binding.** `wrangler.toml` already declares it. To confirm, open **Settings → Bindings** for the project. You should see an R2 bucket with variable name **`SCORES`** pointing to `scorenest-scores`. If it isn't there, add it.
-5. **Add secrets.** Go to **Settings → Variables and Secrets**, add these as type *Secret*, then redeploy:
-   - `APP_PASSWORD`: the password for signing in. Without it, anyone with the URL can use the library.
-   - `SESSION_SECRET`: any long random string.
-   - `ANTHROPIC_API_KEY`: your key from console.anthropic.com. It turns on AI transcription.
-6. Open `https://<project>.pages.dev`. From now on, every push to `main` redeploys automatically.
+1. **Put the code on GitHub.** Upload everything in this folder to a repo, including the `src/` folder.
+2. **Create the R2 bucket.** Go to **R2 Object Storage → Create bucket** and name it `scorenest-scores`.
+3. **Create the Worker.** Go to **Workers & Pages → Create → Import a repository** and pick the repo. Keep the default deploy command (`npx wrangler deploy`).
+   The `name` in `wrangler.toml` (currently `scorenest-scores`) must match the Worker's name in Cloudflare. If you named the Worker differently, change that line.
+4. **Add secrets.** Go to **Settings → Variables and Secrets → Add**, choose type *Secret*, and add `APP_PASSWORD`, `SESSION_SECRET` and `ANTHROPIC_API_KEY`.
+5. Open `https://<worker-name>.<your-subdomain>.workers.dev`. Every push to GitHub redeploys automatically.
+
+The R2 binding (`SCORES`) and the static files (`public/`) are set up by `wrangler.toml`. You don't need to configure them in the dashboard.
 
 ## Deploy with the command line instead
 
 ```bash
 npm install
 npx wrangler login
-npm run create-bucket                       # creates scorenest-scores
-npx wrangler pages project create scorenest --production-branch main
-npx wrangler pages secret put APP_PASSWORD --project-name scorenest
-npx wrangler pages secret put SESSION_SECRET --project-name scorenest
-npx wrangler pages secret put ANTHROPIC_API_KEY --project-name scorenest
+npm run create-bucket
+npx wrangler secret put APP_PASSWORD
+npx wrangler secret put SESSION_SECRET
+npx wrangler secret put ANTHROPIC_API_KEY
 npm run deploy
 ```
 
@@ -103,7 +93,7 @@ npm run deploy
 ```bash
 cp .dev.vars.example .dev.vars   # fill in your values
 npm install
-npm run dev                      # http://localhost:8788 (uses a local R2 simulator)
+npm run dev                      # http://localhost:8787 (uses a local R2 simulator)
 npm test                         # API + notation helper tests
 ```
 
