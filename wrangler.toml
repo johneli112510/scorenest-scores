@@ -1,0 +1,17 @@
+# Cloudflare Pages project config (used by `wrangler pages dev/deploy` and by Git-connected Pages builds)
+name = "scorenest"
+pages_build_output_dir = "public"
+compatibility_date = "2025-01-01"
+
+[[r2_buckets]]
+binding = "SCORES"
+bucket_name = "scorenest-scores"
+
+[vars]
+# Claude model used for PDF / image transcription. Change if you prefer another model.
+CLAUDE_MODEL = "claude-sonnet-5-5"
+
+# Secrets (set in the Cloudflare dashboard → Settings → Variables and Secrets, or with wrangler):
+#   APP_PASSWORD       – password to sign in (leave unset to make the library open to anyone)
+#   SESSION_SECRET     – any long random string (optional, recommended)
+#   ANTHROPIC_API_KEY  – enables AI transcription of PDFs and photos
