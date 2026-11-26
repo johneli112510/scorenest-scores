@@ -364,3 +364,35 @@ textarea.input { height: auto; padding: 10px 12px; resize: vertical; }
   .media-pane, .media-video { max-height: 28vh; }
   .media-yt { width: min(100%, calc(28vh * 16 / 9)); }
 }
+
+/* The library and score desk share a dark instrument rail and a paper canvas. */
+:root { --accent: #304fc4; --bg-sunk: #e7e9ef; }
+.sidebar { background:#20283b; border:0; color:#eef1ff; }
+.sidebar .brand,.sidebar .nav-item,.sidebar .icon-btn { color:#e3e7f3; }
+.sidebar .nav-count,.sidebar .nav-section,.sidebar .nav-empty { color:#aab4ca; }
+.sidebar .nav-item.active { background:#3b4969; color:#fff; }
+.sidebar .nav-item:hover,.sidebar .icon-btn:hover { background:#354057; }
+.sidebar .brand-mark { background:#b5c5ff; color:#253569; }
+.lib-main { background:#f8f9fc; }
+.import-banner { position:relative; isolation:isolate; overflow:hidden; background:#23335b; color:#fff; border-radius:12px; padding:30px 34px; margin:6px 0 24px; }
+.import-banner h2 { font:normal clamp(30px,4vw,52px)/1.12 Georgia,serif; letter-spacing:-.045em; }
+.import-banner p { max-width:420px; color:#d6dff4; margin:10px 0 20px; }
+.import-banner > div:first-child { position:relative; z-index:1; max-width:64%; }
+.import-banner .btn { color:#263967; background:#eef2ff; border:0; }
+.sheet-art { position:absolute; right:6%; top:21%; width:24%; height:130%; transform:rotate(9deg); background:#fffaf0; color:#283144; padding:20px; box-shadow:9px 7px #96a9d0,18px 14px #5f75a5; }
+.sheet-art i { font:italic 17px Georgia,serif; }
+.staff-art { margin:18px 0; line-height:27px; white-space:nowrap; font:26px/27px Georgia,serif; background:repeating-linear-gradient(to bottom,#b6b3ae 0 1px,transparent 1px 6px); }
+.xml-progress { width:100%; accent-color:var(--accent); }
+.xml-workspace { grid-row:2 / 5; display:grid; min-height:0; min-width:0; grid-template-columns:minmax(0,1fr); }
+.xml-workspace.compare { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.xml-original { padding:18px; background:#d3d7df; overflow:auto; border-right:1px solid #b8bfcd; }
+.xml-original h3 { margin:0 0 12px; }
+.editor .ed-top { background:#f7f8fc; }
+.ed-top-actions { flex-wrap:wrap; justify-content:flex-end; }
+@media(max-width:760px) {
+  .import-banner { padding:24px 18px; }
+  .sheet-art { right:-4%; width:32%; }
+  .ed-top { flex-wrap:wrap; }
+  .ed-top-actions { justify-content:flex-start; }
+  .xml-workspace.compare { grid-template-columns:minmax(0,1fr); grid-template-rows:repeat(2,minmax(0,1fr)); }
+}

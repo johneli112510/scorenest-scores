@@ -1,6 +1,7 @@
 // ScoreNest — app shell, router, library, new-score and import flows.
 import { api, h, $, $$, state, toast, modal, promptModal, confirmModal, download, safeName, timeAgo, icon, esc } from './lib.js';
 import { makeTemplate, TEMPLATES, KEYS, METERS, headerField } from './abc.js';
+import { convertMusicXML } from './musicxml.js';
 import { renderScore } from './score.js';
 import { openTranscribe, thumbFromFile } from './transcribe.js';
 import { shareModal } from './share.js';
@@ -68,6 +69,12 @@ async function renderLibrary(ctx) {
       h('button', { class: 'icon-btn mobile-only', html: icon('menu'), onclick: () => sidebar.classList.toggle('open') }),
       heading,
       h('div', { class: 'lib-tools' }, h('div', { class: 'search-wrap' }, h('span', { html: icon('search', 16) }), search), sortSel, viewBtn)),
+    ctx.view === 'all' && h('section', { class: 'import-banner' },
+      h('div', {}, h('h2', {}, 'From paper to MusicXML'),
+        h('p', {}, 'Import a scan or sheet music photo, then take the notation into MuseScore.'),
+        h('button', { class: 'btn', onclick: () => pickFiles(ctx), html: icon('upload', 16) + ' Import a score' })),
+      h('div', { class: 'sheet-art', 'aria-hidden': 'true' },
+        h('i', {}, 'Andante'), h('div', { class: 'staff-art' }, '♩  ♫  ♩  ♬'), h('div', { class: 'staff-art' }, '♫  ♩  ♬  ♩'))),
     listEl);
 
   app.innerHTML = '';
@@ -136,13 +143,9 @@ function emptyState(ctx, q) {
   if (ctx.view === 'trash') return h('div', { class: 'empty' }, h('div', { class: 'empty-icon', html: icon('trash', 36) }), h('p', {}, 'Trash is empty.'));
   if (ctx.view === 'starred') return h('div', { class: 'empty' }, h('div', { class: 'empty-icon', html: icon('star', 36) }), h('p', {}, 'Star the scores you use most and they will show up here.'));
   if (ctx.view === 'shared') return h('div', { class: 'empty' }, h('div', { class: 'empty-icon', html: icon('globe', 36) }), h('p', {}, 'Scores you share with a link appear here.'));
-  return h('div', { class: 'empty empty-big' },
-    h('div', { class: 'empty-icon', html: icon('music', 40) }),
-    h('h2', {}, 'Start your library'),
-    h('p', { class: 'muted' }, 'Write a new score, or drop in a PDF or photo of sheet music and let AI turn it into notation you can play, transpose and edit.'),
-    h('div', { class: 'row center' },
-      h('button', { class: 'btn btn-primary', onclick: () => openNewScore(ctx), html: `${icon('plus', 16)}<span>New score</span>` }),
-      h('button', { class: 'btn', onclick: () => pickFiles(ctx), html: `${icon('upload', 16)}<span>Import / transcribe</span>` })));
+  return h('div', { class: 'empty empty-big' }, h('h2', {}, 'No scores yet'),
+    h('p', { class: 'muted' }, 'Imported scores and new compositions appear here.'),
+    h('button', { class: 'btn', onclick: () => openNewScore(ctx) }, 'Write a new score'));
 }
 
 function scoreCard(s, ctx, redraw) {
@@ -273,7 +276,7 @@ function refreshSidebar(sidebar, ctx) {
     h('nav', { class: 'nav' }, folders.length ? folders : h('p', { class: 'muted small nav-empty' }, 'No folders yet')),
     h('div', { class: 'sidebar-foot' },
       state.session?.aiEnabled ? h('div', { class: 'ai-pill', html: `${icon('sparkle', 14)}<span>AI transcription on</span>` })
-        : h('div', { class: 'ai-pill off', title: 'Add the ANTHROPIC_API_KEY secret in Cloudflare to enable', html: `${icon('sparkle', 14)}<span>AI transcription off</span>` }),
+        : h('div', { class: 'ai-pill off', title: 'Add the GEMINI_API_KEY secret in Cloudflare to enable', html: `${icon('sparkle', 14)}<span>AI transcription off</span>` }),
       state.session?.authRequired ? h('button', { class: 'nav-item', onclick: async () => { await api('logout', { method: 'POST' }); state.session = null; route(); } },
         h('span', { html: icon('logout', 17) }), h('span', { class: 'nav-label' }, 'Sign out')) : null));
   sidebar.addEventListener('click', (e) => { if (e.target.closest('a.nav-item')) sidebar.classList.remove('open'); });
@@ -334,21 +337,24 @@ function openImport(files, ctx) {
   if (!usable.length) { toast('Supported files: PDF, PNG, JPG, WebP, MusicXML (.musicxml/.xml/.mxl) and ABC', 'error', 5000); return; }
   const hasScans = usable.some((f) => ['pdf', 'image'].includes(kindOf(f)));
   const ai = state.session?.aiEnabled;
-  const modeAi = h('input', { type: 'radio', name: 'imode', value: 'ai', checked: ai, disabled: !ai });
+  const modeXml = h('input', { type: 'radio', name: 'imode', checked: ai, disabled: !ai });
+  const modeAi = h('input', { type: 'radio', name: 'imode', value: 'ai', disabled: !ai });
   const modeStore = h('input', { type: 'radio', name: 'imode', value: 'store', checked: !ai });
   const list = h('ul', { class: 'file-list' }, usable.map((f) => h('li', {}, h('span', { class: `badge badge-${kindOf(f)}` }, kindOf(f).toUpperCase()), h('span', { class: 'file-name' }, f.name), h('span', { class: 'muted small' }, `${(f.size / 1024 / 1024).toFixed(1)} MB`))));
   modal({
     title: 'Import scores', wide: true,
     content: h('div', { class: 'stack' }, list,
       hasScans ? h('div', { class: 'field' }, h('span', {}, 'PDFs and photos'),
+        h('label', { class: 'choice' }, modeXml, h('div', {}, h('strong', {}, 'Convert to MusicXML'),
+          h('p', { class: 'muted small' }, 'Recognize the printed music, review the score and download a .musicxml file.'))),
         h('label', { class: 'choice' }, modeAi, h('div', {}, h('strong', {}, 'Transcribe into editable notation with AI'),
-          h('p', { class: 'muted small' }, ai ? 'Claude reads the pages and writes playable, editable notation. The original file is kept alongside for comparison.' : 'Not available until the ANTHROPIC_API_KEY secret is added in Cloudflare.'))),
+          h('p', { class: 'muted small' }, ai ? 'Gemini reads the pages and writes playable, editable notation. The original file is kept alongside for comparison.' : 'Not available until the GEMINI_API_KEY secret is added in Cloudflare.'))),
         h('label', { class: 'choice' }, modeStore, h('div', {}, h('strong', {}, 'Just store and view'),
           h('p', { class: 'muted small' }, 'Keep the PDF or picture in your library. You can transcribe it later.')))) : null,
       h('p', { class: 'muted small' }, 'MusicXML files open in the viewer (and can be made editable). ABC files open straight in the editor.')),
     actions: [{ label: 'Cancel', onClick: (c) => c() }, { label: 'Import', primary: true, onClick: async (c) => {
       c();
-      const transcribe = hasScans && modeAi.checked;
+      const transcribe = hasScans && (modeXml.checked ? 'musicxml' : modeAi.checked ? 'abc' : null);
       let last = null;
       for (const f of usable) {
         try { last = await importOne(f, transcribe, ctx) || last; }
@@ -381,10 +387,11 @@ async function importOne(file, transcribe, ctx) {
     return meta;
   }
   // pdf / image
-  if (transcribe) return openTranscribe({ file, folder });
+  if (transcribe === 'abc') return openTranscribe({ file, folder });
   const meta = await api('scores', { method: 'POST', body: { type: kind, title: baseTitle, folder } });
   await api(`scores/${meta.id}/source`, { method: 'PUT', body: file, headers: { 'content-type': file.type || (kind === 'pdf' ? 'application/pdf' : 'image/jpeg'), 'x-filename': encodeURIComponent(file.name) } });
   try { await api(`scores/${meta.id}/thumb`, { method: 'PUT', body: await thumbFromFile(file, kind === 'pdf'), headers: { 'content-type': 'image/svg+xml' } }); } catch { /* optional */ }
+  if (transcribe === 'musicxml') return await convertMusicXML(meta) || meta;
   return meta;
 }
 

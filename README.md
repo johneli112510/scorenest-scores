@@ -1,6 +1,6 @@
 # ScoreNest
 
-A Soundslice-style interactive sheet music app — notation synced to real recordings, with practice tools, an editor and AI transcription — that runs as a **Cloudflare Worker** (static assets + API), with every file stored in **Cloudflare R2**.
+A score library and notation workspace with PDF-to-MusicXML recognition, an ABC editor and recording-synced practice tools — that runs as a **Cloudflare Worker** (static assets + API), with every file stored in **Cloudflare R2**.
 
 ## Features
 
@@ -26,7 +26,7 @@ A Soundslice-style interactive sheet music app — notation synced to real recor
 - Drag and drop files anywhere on the library to import them
 
 **AI transcription (PDF / photo → editable score)**
-- Upload a PDF or a photo (PNG, JPG, WebP) and Claude reads each page and writes it out as editable notation (ABC)
+- Upload a PDF or a photo (PNG, JPG, WebP) and Gemini reads each page and writes it out as editable notation (ABC)
 - You watch it happen: the notation text and the rendered score update live while each page is read
 - Multi-page PDFs (up to 30 pages per run, with a page range you choose). Tall pages are split in half so small notes stay readable
 - The original file is kept with the score. The **Original** tab shows it next to the editor so you can check the result
@@ -88,7 +88,7 @@ test/                   API tests with an in-memory R2 (npm test)
 2. **Create the R2 bucket.** Go to **R2 Object Storage → Create bucket** and name it `scorenest-scores`.
 3. **Create the Worker.** Go to **Workers & Pages → Create → Import a repository** and pick the repo. Keep the default deploy command (`npx wrangler deploy`).
    The `name` in `wrangler.toml` (currently `scorenest-scores`) must match the Worker's name in Cloudflare. If you named the Worker differently, change that line.
-4. **Add secrets.** Go to **Settings → Variables and Secrets → Add**, choose type *Secret*, and add `APP_PASSWORD`, `SESSION_SECRET` and `ANTHROPIC_API_KEY`.
+4. **Add secrets.** Go to **Settings → Variables and Secrets → Add**, choose type *Secret*, and add `APP_PASSWORD`, `SESSION_SECRET` and `GEMINI_API_KEY`.
 5. Open `https://<worker-name>.<your-subdomain>.workers.dev`. Every push to GitHub redeploys automatically.
 
 The R2 binding (`SCORES`) and the static files (`public/`) are set up by `wrangler.toml`. You don't need to configure them in the dashboard.
@@ -101,7 +101,7 @@ npx wrangler login
 npm run create-bucket
 npx wrangler secret put APP_PASSWORD
 npx wrangler secret put SESSION_SECRET
-npx wrangler secret put ANTHROPIC_API_KEY
+npx wrangler secret put GEMINI_API_KEY
 npm run deploy
 ```
 
@@ -116,6 +116,24 @@ npm test                         # API + notation helper tests
 
 ## Notes
 
-- AI transcription uses the Claude API, which is billed to your Anthropic account per page. Clean, straight, high-contrast scans give the best results. Always check the result against the Original tab. Dense piano or orchestral scores will need more corrections than choir or lead-sheet music.
-- The model is set by `CLAUDE_MODEL` in `wrangler.toml`.
+- AI transcription uses the Gemini API. Each recognized page uses one request against your project's quota. Clean, straight, high-contrast scans give the best results. Always check the result against the Original tab. Dense piano or orchestral scores will need more corrections than choir or lead-sheet music.
+- The model is set by `GEMINI_MODEL` in `wrangler.toml`.
 - The notation engine (abcjs), the MusicXML renderer (OpenSheetMusicDisplay) and the PDF renderer (pdf.js) load from the jsDelivr CDN, so there is no build step.
+
+## PDF or photo to MusicXML
+
+Run the Worker with its R2 binding and set `GEMINI_API_KEY` in
+`.dev.vars` locally or as a Worker secret when deployed. Select a vision-capable
+`GEMINI_MODEL` your Google AI Studio project can access. Recognition sends selected
+pages to that service for recognition. Create a key at https://aistudio.google.com/apikey and choose a free-tier project to use its available quota. Google may use free-tier submissions to improve its products.
+
+Choose **Import a score**, select a PDF, PNG, JPEG or WebP file, then choose
+**Convert to MusicXML**. For PDFs, select up to 30 consecutive pages.
+Recognition processes each page separately and joins the instrument parts.
+The original upload is saved first, so you can reopen it after cancellation
+or a recognition error. In the result, choose **Compare original** to check
+the engraving and **Download MusicXML** to open it in MuseScore. Dense scores
+may need smaller scans. Review accidentals, rhythms and part assignments.
+
+Existing ABC tunes can be converted from the editor's **Export → MusicXML**
+menu. MusicXML and compressed MXL files open directly in the viewer. Download MusicXML also extracts the primary score from an MXL archive without using AI.

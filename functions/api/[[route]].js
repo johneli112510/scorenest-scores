@@ -193,7 +193,7 @@ async function mediaResponse(env, request, key, fallbackType) {
 }
 const publicRecording = (r) => ({ id: r.id, name: r.name, kind: r.kind, mime: r.mime, youtube: r.youtube, sync: r.sync });
 
-// ---------- AI transcription (Claude vision) ----------
+// ---------- AI transcription (Gemini vision) ----------
 const ABC_RULES = `Output rules:
 - Output ONLY valid ABC notation (standard 2.1). No commentary, no markdown, no code fences.
 - Be faithful to the page: pitches, rhythms, rests, ties, slurs, accidentals, key and time signature changes, repeats and voltas, dynamics (!p! !f! etc.), fermatas, tempo text, chord symbols in quotes.
@@ -204,50 +204,55 @@ const ABC_RULES = `Output rules:
 
 function buildTranscribePrompt(body) {
   const mode = body.mode;
+  if (mode === 'xml-abc') {
+    return [{ text: 'Convert the complete ABC tune into a MusicXML score-partwise document. Preserve all voices, measures, lyrics and markings.\n' + body.text }];
+  }
   if (mode === 'convert') {
-    return [{ type: 'text', text: `Convert this MusicXML score into equivalent ABC notation.\n${ABC_RULES}\n\nMusicXML:\n${clip(body.text, 400000)}` }];
+    return [{ text: `Convert this MusicXML score into equivalent ABC notation.\n${ABC_RULES}\n\nMusicXML:\n${clip(body.text, 400000)}` }];
   }
   const images = (Array.isArray(body.images) ? body.images : []).slice(0, 4).map((img) => ({
-    type: 'image',
-    source: { type: 'base64', media_type: /^image\/(png|jpeg|webp|gif)$/.test(img.media_type) ? img.media_type : 'image/jpeg', data: img.data },
+    inlineData: { mimeType: /^image\/(png|jpeg|webp|gif)$/.test(img.media_type) ? img.media_type : 'image/jpeg', data: img.data },
   }));
   const hint = body.hint ? `\nNotes from the user about this score: ${clip(body.hint, 500)}` : '';
   let text;
-  if (mode === 'continue') {
+  if (mode === 'xml-page') {
+    text = 'Read this printed page into a complete MusicXML 4.0 score-partwise document. Image crops overlap: transcribe each system once. Preserve instruments, voices, staff assignments, rhythms, rests, chords, dynamics, lyrics, repeats and ties. Include divisions, key, meter and clefs in the first measure of every part. Include only music visible on this page. If unreadable, return UNREADABLE.';
+    if (body.parts) text += '\nUse exactly the preceding part IDs and names: ' + clip(body.parts, 4000);
+  } else if (mode === 'continue') {
     text = `These images are page ${body.page} (of ${body.pages}) of a score you are already transcribing. The ABC header and voice definitions already written are:\n\n${clip(body.header, 4000)}\n\nThe last lines transcribed so far were:\n${clip(body.tail, 2000)}\n\nContinue the transcription with the music on this page ONLY. Do NOT repeat the header (no X:, T:, M:, K: or V: definitions), but do use [V:...] markers for each voice exactly as defined, and inline [M:] / [K:] fields for any changes.${hint}\n${ABC_RULES}`;
   } else {
     text = `Transcribe this sheet music (page ${body.page || 1} of ${body.pages || 1}) into ABC notation. Start with a full header: X:1, T: (title from the page${body.title ? `, or "${clip(body.title, 120)}"` : ''}), C: (composer/arranger if shown), M:, L:, Q: (if shown), voice definitions, and K: last.${hint}\n${ABC_RULES}`;
   }
-  return [...images, { type: 'text', text }];
+  return [...images, { text }];
 }
 
 async function transcribe(request, env) {
-  if (!env.ANTHROPIC_API_KEY) return err('AI transcription is not configured. Add the ANTHROPIC_API_KEY secret in Cloudflare.', 501);
+  if (!env.GEMINI_API_KEY) return err('AI transcription is not configured. Add the GEMINI_API_KEY secret in Cloudflare.', 501);
   const body = await readJson(request);
+  if (body.mode === 'xml-abc' && (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 100000)) return err('Supply one ABC tune up to 100,000 characters.');
   const content = buildTranscribePrompt(body);
-  if (body.mode !== 'convert' && !content.some((c) => c.type === 'image')) return err('No page images received');
+  if (!['convert', 'xml-abc'].includes(body.mode) && !content.some((c) => c.inlineData)) return err('No page images received');
 
-  const upstream = await fetch('https://api.anthropic.com/v1/messages', {
+  const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
+  const instruction = ['xml-abc', 'xml-page'].includes(body.mode)
+    ? 'You are a music engraver. Return only uncompressed MusicXML, without markdown, commentary or a DTD.'
+    : 'You are a music engraver. Transcribe the supplied music precisely into ABC notation.';
+  const upstream = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': String(env.ANTHROPIC_API_KEY).trim().replace(/^["']|["']$/g, ''),
-      'anthropic-version': '2023-06-01',
-    },
+    signal: request.signal,
+    headers: { 'content-type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY.trim() },
     body: JSON.stringify({
-      model: env.CLAUDE_MODEL || 'claude-sonnet-5-5',
-      max_tokens: 16000,
-      stream: true,
-      system: 'You are an expert music engraver and optical music recognition system. You read printed or handwritten sheet music and write it out precisely in ABC notation.',
-      messages: [{ role: 'user', content }],
+      systemInstruction: { parts: [{ text: instruction }] },
+      contents: [{ role: 'user', parts: content }],
+      generationConfig: { maxOutputTokens: 32768 },
     }),
   });
   if (!upstream.ok) {
     const detail = await upstream.text();
-    if (upstream.status === 401) return err('The Anthropic API key was rejected. In Cloudflare, re-enter the ANTHROPIC_API_KEY secret with a valid key from console.anthropic.com (it starts with sk-ant-).', 502);
-    if (upstream.status === 400 && /credit balance/i.test(detail)) return err('Your Anthropic account has no credits left. Add credits at console.anthropic.com → Billing.', 502);
-    if (upstream.status === 404 && /model/i.test(detail)) return err('The AI model name is not available on your account. Change CLAUDE_MODEL in wrangler.toml.', 502);
-    return err(`AI service error (${upstream.status}): ${detail.slice(0, 400)}`, 502);
+    if (upstream.status === 429) return err('Gemini quota reached. Check the project limits in Google AI Studio and retry after the quota resets.', 429);
+    if ([401, 403].includes(upstream.status) || /API_KEY_INVALID|API key not valid/i.test(detail)) return err('Check the GEMINI_API_KEY secret and its project permissions in Google AI Studio.', 502);
+    if (upstream.status === 404) return err('This Gemini model is unavailable for your project. Check GEMINI_MODEL in wrangler.toml.', 502);
+    return err(`Gemini could not process this request (HTTP ${upstream.status}).`, 502);
   }
   // Stream the server-sent events straight through to the browser so the user sees notes appear live.
   return new Response(upstream.body, {
@@ -281,7 +286,7 @@ export async function onRequest(context) {
   try {
     // ----- open routes -----
     if (root === 'session' && method === 'GET') {
-      return json({ authRequired: authRequired(env), authenticated: await isAuthenticated(request, env), aiEnabled: !!env.ANTHROPIC_API_KEY });
+      return json({ authRequired: authRequired(env), authenticated: await isAuthenticated(request, env), aiEnabled: !!env.GEMINI_API_KEY });
     }
     if (root === 'login' && method === 'POST') {
       if (!authRequired(env)) return json({ ok: true });
@@ -391,6 +396,10 @@ export async function onRequest(context) {
         if ('folder' in body) meta.folder = body.folder || null;
         if (body.trashed === true) meta.trashedAt = Date.now();
         // A stored PDF / image / MusicXML score can be turned into an editable ABC score (after AI transcription)
+        if (body.type === 'musicxml' && ['pdf', 'image'].includes(meta.type) && typeof body.content === 'string') {
+          meta.type = 'musicxml';
+          meta.transcribed = true;
+        }
         if (body.type === 'abc' && meta.type !== 'abc' && typeof body.content === 'string') {
           if (meta.type === 'musicxml' || meta.type === 'mxl') await env.SCORES.delete(`scores/${id}/content`);
           meta.type = 'abc'; meta.transcribed = true; meta.lastSnap = 0;

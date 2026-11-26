@@ -4,6 +4,8 @@ import { api, h, $, $$, modal, toast, download, safeName, debounce, timeAgo, ico
 import { headerField, durationSuffix, midiToAbc, shiftPitch, setPitchLetter, setDuration, toRest, toggleAccidental } from './abc.js';
 import { openTranscribe, thumbFromFile } from './transcribe.js';
 import { shareModal } from './share.js';
+import { unpackMxl } from './mxl.js';
+import { convertMusicXML } from './musicxml.js';
 import { createPlayer } from './player.js';
 
 const ABCJS = () => window.ABCJS;
@@ -91,13 +93,15 @@ function fileViewer(root, meta) {
   const url = `/api/scores/${meta.id}/source`;
   const view = h('div', { class: 'file-view' });
   const save = (patch) => api(`scores/${meta.id}`, { method: 'PUT', body: patch }).then((m) => Object.assign(meta, m)).catch((e) => toast(e.message, 'error'));
-  const transcribeBtn = h('button', { class: 'btn btn-primary', html: `${icon('sparkle', 16)}<span>Transcribe to editable</span>`, onclick: async () => {
+  const transcribeBtn = h('button', { class: 'btn', html: `${icon('sparkle', 16)}<span>Transcribe to editable</span>`, onclick: async () => {
     const res = await openTranscribe({ score: meta });
     if (res) { location.hash = `#/score/${meta.id}`; window.dispatchEvent(new HashChangeEvent('hashchange')); }
   } });
   root.innerHTML = '';
   root.append(h('div', { class: 'editor' },
-    topBar({ meta, onTitle: save, extra: [transcribeBtn, h('a', { class: 'btn', href: url, target: '_blank', rel: 'noopener', html: `${icon('file', 16)}<span>Open original</span>` })] }),
+    topBar({ meta, onTitle: save, extra: [h('button', { class: 'btn btn-primary', onclick: async () => {
+      if (await convertMusicXML(meta)) window.dispatchEvent(new HashChangeEvent('hashchange'));
+    } }, 'Convert to MusicXML'), transcribeBtn, h('a', { class: 'btn', href: url, target: '_blank', rel: 'noopener', html: `${icon('file', 16)}<span>Open original</span>` })] }),
     h('div', { class: 'file-note' }, 'This score is stored as a ', meta.type === 'pdf' ? 'PDF' : 'picture', '. Transcribe it to play it back, transpose it and edit the notes.'),
     view));
   if (meta.type === 'pdf') renderPdfInto(view, url).catch((e) => { view.textContent = e.message; });
@@ -110,6 +114,15 @@ async function xmlViewer(root, meta, content, publicMode) {
   const paper = h('div', { class: 'osmd-paper' });
   let zoom = 1, osmd;
   const fileUrl = publicMode ? `/api/public/${meta.id}/file` : `/api/scores/${meta.id}/file`;
+  let extracted;
+  function scoreText() {
+    if (meta.type !== 'mxl') return Promise.resolve(content);
+    extracted ??= fetch(fileUrl).then(async res => {
+      if (!res.ok) throw new Error('Could not open the MXL file.');
+      return unpackMxl(await res.arrayBuffer());
+    }).catch(err => { extracted = undefined; throw err; });
+    return extracted;
+  }
   const save = (patch) => api(`scores/${meta.id}`, { method: 'PUT', body: patch }).then((m) => Object.assign(meta, m)).catch((e) => toast(e.message, 'error'));
   const zoomBy = (d) => { zoom = Math.min(2.5, Math.max(0.4, zoom + d)); if (osmd) { osmd.Zoom = zoom; osmd.render(); } };
 
@@ -119,24 +132,43 @@ async function xmlViewer(root, meta, content, publicMode) {
   ];
   if (!publicMode) {
     extra.push(h('button', { class: 'btn btn-primary', html: `${icon('sparkle', 16)}<span>Make editable</span>`, onclick: async () => {
-      const text = content ?? await (await fetch(fileUrl)).text().catch(() => null);
-      if (!text || meta.type === 'mxl') { toast('Compressed .mxl files can be viewed but not converted. Export as uncompressed MusicXML first.', 'error', 6000); return; }
+      let text;
+      try { text = await scoreText(); } catch (e) { toast(e.message, 'error'); return; }
       const res = await openTranscribe({ musicxml: { text, title: meta.title } });
       if (res) location.hash = `#/score/${res.id}`;
     } }));
     extra.push(h('button', { class: 'btn', html: `${icon('share', 16)}<span>Share</span>`, onclick: () => shareModal(meta) }));
   }
+  const original = h('aside', { class: 'xml-original hidden', 'aria-label': 'Original score' });
+  const workspace = h('div', { class: 'xml-workspace' }, original, h('div', { class: 'osmd-wrap' }, paper));
+  if (meta.source && !publicMode) {
+    const url = '/api/scores/' + meta.id + '/source';
+    extra.unshift(h('button', { class: 'btn', 'aria-pressed': 'false', onclick: e => {
+      const opened = workspace.classList.toggle('compare');
+      e.currentTarget.setAttribute('aria-pressed', String(opened));
+      original.classList.toggle('hidden', !opened);
+      if (opened && !original.hasChildNodes()) {
+        original.append(h('h3', {}, 'Original score'));
+        if (/pdf/i.test(meta.sourceType) || /\.pdf$/i.test(meta.source)) renderPdfInto(original, url).catch(error => { original.textContent = error.message; });
+        else original.append(h('img', { class: 'file-img', src: url, alt: 'Original score' }));
+      }
+    } }, 'Compare original'));
+  }
+  extra.push(h('button', { class: 'btn btn-primary', onclick: async () => {
+    try { download(await scoreText(), safeName(meta.title) + '.musicxml', 'application/vnd.recordare.musicxml+xml'); }
+    catch (e) { toast(e.message, 'error'); }
+  } }, 'Download MusicXML'));
   extra.push(exportMenu([
     ['MusicXML file', () => fetch(fileUrl).then((r) => r.blob()).then((b) => download(b, `${safeName(meta.title)}.${meta.type === 'mxl' ? 'mxl' : 'musicxml'}`))],
     ['Print / save as PDF', () => printSvgs(meta.title, $$('svg', paper))],
   ]));
 
   root.innerHTML = '';
-  root.append(h('div', { class: 'editor' }, topBar({ meta, publicMode, onTitle: save, extra }), h('div', { class: 'osmd-wrap' }, paper)));
+  root.append(h('div', { class: 'editor' }, topBar({ meta, publicMode, onTitle: save, extra }), workspace));
   try {
     const OSMD = await loadOSMD();
     osmd = new OSMD.OpenSheetMusicDisplay(paper, { autoResize: true, drawTitle: true, backend: 'svg' });
-    await osmd.load(meta.type === 'mxl' ? fileUrl : content);
+    await osmd.load(await scoreText());
     osmd.render();
     if (!publicMode) uploadThumb(meta.id, paper.querySelector('svg'));
   } catch (e) {
@@ -411,6 +443,7 @@ function abcEditor(root, meta, initial, publicMode) {
     readOnly ? null : h('button', { class: 'icon-btn', title: 'Version history', html: icon('history'), onclick: showHistory }),
     readOnly ? null : h('button', { class: 'btn', html: `${icon('share', 16)}<span>Share</span>`, onclick: () => shareModal(meta) }),
     exportMenu([
+      !readOnly && ['MusicXML (.musicxml)', () => convertMusicXML(meta, text)],
       ['ABC notation (.abc)', () => download(text, `${safeName(meta.title)}.abc`, 'text/plain')],
       ['MIDI file', () => {
         const midi = ABCJS().synth.getMidiFile(text, { midiOutputType: 'binary' });
@@ -434,7 +467,7 @@ function abcEditor(root, meta, initial, publicMode) {
     h('div', { class: 'tool-group' }, h('span', { class: 'tool-label' }, 'Zoom'),
       h('button', { class: 'pal-btn', onclick: () => setZoom(zoom - 0.1) }, '−'), h('button', { class: 'pal-btn', onclick: () => setZoom(zoom + 0.1) }, '+')),
     readOnly || !meta.source || !state.session?.aiEnabled ? null : h('button', { class: 'btn btn-ghost', html: `${icon('sparkle', 16)}<span>Re-transcribe</span>`, onclick: async () => {
-      if (!(await confirmModal({ title: 'Transcribe again?', message: 'Claude will read the original again and replace the current notation. Your current version is kept in the version history.', okLabel: 'Transcribe again' }))) return;
+      if (!(await confirmModal({ title: 'Transcribe again?', message: 'Gemini will read the original again and replace the current notation. Your current version is kept in the version history.', okLabel: 'Transcribe again' }))) return;
       await persist(true);
       const res = await openTranscribe({ score: { ...meta } });
       if (res) { const d = await api(`scores/${meta.id}`); setText(d.content); dirty = false; setStatus('Saved', 'ok'); }

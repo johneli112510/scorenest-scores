@@ -6,7 +6,7 @@ const TARGET_WIDTH = 1700;
 const MAX_PAGES = 30;
 
 // Turn a canvas into one or two JPEG parts (tall pages are split in half so small notes stay readable).
-function canvasToParts(canvas) {
+export function canvasToParts(canvas) {
   const toPart = (c) => ({ media_type: 'image/jpeg', data: c.toDataURL('image/jpeg', 0.85).split(',')[1] });
   if (canvas.height < canvas.width * 1.15) return [toPart(canvas)];
   const overlap = Math.round(canvas.height * 0.04);
@@ -31,24 +31,28 @@ function whiteCanvas(w, hgt) {
 export async function pdfPageCount(source) {
   const pdfjs = await loadPdfJs();
   const doc = await pdfjs.getDocument(source).promise;
-  return doc.numPages;
+  try { return doc.numPages; } finally { await doc.destroy(); }
 }
 
-async function* pdfPages(source, from, to) {
+export async function* pdfPages(source, from, to) {
   const pdfjs = await loadPdfJs();
   const doc = await pdfjs.getDocument(source).promise;
   const last = Math.min(to || doc.numPages, doc.numPages);
-  for (let i = Math.max(1, from || 1); i <= last; i++) {
-    const page = await doc.getPage(i);
-    const base = page.getViewport({ scale: 1 });
-    const vp = page.getViewport({ scale: TARGET_WIDTH / base.width });
-    const canvas = whiteCanvas(Math.round(vp.width), Math.round(vp.height));
-    await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
-    yield { page: i, total: last - Math.max(1, from || 1) + 1, canvas };
+  try {
+    for (let i = Math.max(1, from || 1); i <= last; i++) {
+      const page = await doc.getPage(i);
+      const base = page.getViewport({ scale: 1 });
+      const vp = page.getViewport({ scale: TARGET_WIDTH / base.width });
+      const canvas = whiteCanvas(Math.round(vp.width), Math.round(vp.height));
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+      yield { page: i, total: last - Math.max(1, from || 1) + 1, canvas };
+    }
+  } finally {
+    await doc.destroy();
   }
 }
 
-async function imageCanvas(blob) {
+export async function imageCanvas(blob) {
   const url = URL.createObjectURL(blob);
   try {
     const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('Could not read image')); i.src = url; });
@@ -79,8 +83,8 @@ export async function thumbFromFile(blob, isPdf) {
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${canvas.width} ${canvas.height}" width="${canvas.width}" height="${canvas.height}"><image href="${data}" width="${canvas.width}" height="${canvas.height}"/></svg>`;
 }
 
-// Stream text from the /api/transcribe endpoint (Claude server-sent events).
-async function streamAI(body, onText, signal) {
+// Stream text from the /api/transcribe endpoint (Gemini server-sent events).
+export async function streamAI(body, onText, signal) {
   const res = await fetch('/api/transcribe', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal });
   if (!res.ok) {
     let msg = `Transcription failed (${res.status})`;
@@ -89,22 +93,34 @@ async function streamAI(body, onText, signal) {
   }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
-  let buf = '', out = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let i;
-    while ((i = buf.indexOf('\n\n')) >= 0) {
-      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
-      for (const line of chunk.split('\n')) {
-        if (!line.startsWith('data:')) continue;
-        let d; try { d = JSON.parse(line.slice(5)); } catch { continue; }
-        if (d.type === 'content_block_delta' && d.delta?.text) { out += d.delta.text; onText(out); }
-        else if (d.type === 'error') throw new Error(d.error?.message || 'AI error');
-      }
+  let buf = '', out = '', finished = false;
+  function consume(event) {
+    const payload = event.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+    if (!payload) return;
+    const data = JSON.parse(payload);
+    const candidate = data.candidates?.[0];
+    if (data.error || data.promptFeedback?.blockReason) throw new Error('Gemini could not process this score.');
+    for (const part of candidate?.content?.parts || []) {
+      if (!part.thought && part.text) { out += part.text; onText(out); }
     }
+    const reason = candidate?.finishReason;
+    if (reason === 'MAX_TOKENS') throw new Error('This page exceeded the recognition limit. Try a smaller section.');
+    if (reason && reason !== 'STOP') throw new Error('Recognition stopped before the score was complete.');
+    if (reason === 'STOP') finished = true;
   }
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      buf += dec.decode(value, { stream: !done });
+      const events = buf.split(/\r?\n\r?\n/);
+      buf = events.pop();
+      for (const event of events) consume(event);
+      if (done) { consume(buf); break; }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  if (!finished || !out.trim()) throw new Error('Gemini returned an incomplete transcription. Please retry.');
   return out;
 }
 
@@ -128,11 +144,11 @@ export function openTranscribe(opts) {
     const hint = h('textarea', { class: 'input', rows: 2, placeholder: 'Optional: e.g. "SATB choir with piano, lyrics in Tagalog", "lead sheet", "guitar tab — ignore the tab staff"' });
     const setup = h('div', { class: 'stack' },
       h('p', { class: 'muted' }, isXml
-        ? 'Claude will rewrite this MusicXML as an editable score. The original stays untouched.'
-        : 'Claude reads each page and writes it out as editable notation you can play, transpose and correct. Clean, straight scans give the best results.'),
+        ? 'Gemini will rewrite this MusicXML as an editable score. The original stays untouched.'
+        : 'Gemini reads each page and writes it out as editable notation you can play, transpose and correct. Clean, straight scans give the best results.'),
       h('label', { class: 'field' }, h('span', {}, 'Score title'), title),
       isPdf ? h('div', { class: 'field' }, h('span', {}, 'Pages to transcribe'), h('div', { class: 'row' }, from, h('span', {}, 'to'), to, pageInfo)) : null,
-      isXml ? null : h('label', { class: 'field' }, h('span', {}, 'Anything Claude should know?'), hint));
+      isXml ? null : h('label', { class: 'field' }, h('span', {}, 'Anything Gemini should know?'), hint));
 
     const status = h('div', { class: 'tx-status' }, 'Preparing…');
     const bar = h('div', { class: 'progress' }, h('div', { class: 'progress-fill' }));
@@ -179,7 +195,7 @@ export function openTranscribe(opts) {
 
     async function start() {
       await sourceReady;
-      if (!state.session?.aiEnabled) { toast('AI transcription is not set up on the server yet (ANTHROPIC_API_KEY).', 'error', 6000); return; }
+      if (!state.session?.aiEnabled) { toast('AI transcription is not set up on the server yet (GEMINI_API_KEY).', 'error', 6000); return; }
       setup.classList.add('hidden'); running.classList.remove('hidden');
       startBtn.disabled = true; startBtn.textContent = 'Transcribing…';
       controller = new AbortController();
@@ -225,7 +241,7 @@ export function openTranscribe(opts) {
         const saved = await save(result);
         finished = true;
         m.close();
-        toast('Transcription finished. Check it against the original and fix anything Claude misread.', 'success', 6000);
+        toast('Transcription finished. Check it against the original and fix anything Gemini misread.', 'success', 6000);
         resolve(saved);
       } catch (e) {
         if (e.name === 'AbortError') return;

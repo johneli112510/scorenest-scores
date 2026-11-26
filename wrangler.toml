@@ -13,10 +13,10 @@ binding = "SCORES"
 bucket_name = "scorenest-scores"
 
 [vars]
-# Claude model used for PDF / image transcription.
-CLAUDE_MODEL = "claude-sonnet-5-5"
+# Gemini model used for PDF / image transcription.
+GEMINI_MODEL = "gemini-3.8-flash"
 
 # Secrets (dashboard → your Worker → Settings → Variables and Secrets → Add → type "Secret"):
 #   APP_PASSWORD       – password to sign in (leave unset = open to anyone with the URL)
 #   SESSION_SECRET     – any long random string
-#   ANTHROPIC_API_KEY  – enables AI transcription of PDFs and photos
+#   GEMINI_API_KEY  – enables AI transcription of PDFs and photos

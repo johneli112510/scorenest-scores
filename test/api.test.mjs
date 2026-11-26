@@ -2,7 +2,7 @@ import { onRequest } from '../functions/api/[[route]].js';
 import { MockR2 } from './mock-r2.mjs';
 import assert from 'node:assert/strict';
 
-const env = { SCORES: new MockR2(), APP_PASSWORD: 'secret', ANTHROPIC_API_KEY: 'k' };
+const env = { SCORES: new MockR2(), APP_PASSWORD: 'secret', GEMINI_API_KEY: 'k' };
 let cookie = '';
 async function call(method, path, body, headers = {}) {
   const init = { method, headers: { ...headers, cookie } };
@@ -68,19 +68,25 @@ cookie = saved;
 
 // transcribe validation (no network call when no images)
 r = await call('POST', 'transcribe', { mode: 'first', images: [] }); assert.equal(r.status, 400);
-const noAi = env.ANTHROPIC_API_KEY; delete env.ANTHROPIC_API_KEY;
+const noAi = env.GEMINI_API_KEY; delete env.GEMINI_API_KEY;
 r = await call('POST', 'transcribe', { mode: 'first', images: [{ data: 'x', media_type: 'image/jpeg' }] }); assert.equal(r.status, 501);
-env.ANTHROPIC_API_KEY = noAi;
+env.GEMINI_API_KEY = noAi;
 
-// transcribe passes stream through (mock Anthropic)
+// transcribe passes stream through (mock Gemini)
 const realFetch = globalThis.fetch;
 let sent;
-globalThis.fetch = async (url, init) => { sent = { url, body: JSON.parse(init.body), headers: init.headers }; return new Response('event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"X:1"}}\n\n', { headers: { 'content-type': 'text/event-stream' } }); };
+const event = text => 'data: ' + JSON.stringify({ candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }] }) + '\n\n';
+globalThis.fetch = async (url, init) => {
+  sent = { url, body: JSON.parse(init.body), headers: init.headers };
+  return new Response(event('X:1'), { headers: { 'content-type': 'text/event-stream' } });
+};
 r = await call('POST', 'transcribe', { mode: 'continue', page: 2, pages: 3, header: 'X:1\nK:C', tail: 'CDEF|', images: [{ data: 'abc', media_type: 'image/jpeg' }] });
 globalThis.fetch = realFetch;
-assert.equal(r.status, 200); assert.match(r.data, /text_delta/);
-assert.equal(sent.url, 'https://api.anthropic.com/v1/messages'); assert.equal(sent.body.stream, true); assert.equal(sent.body.messages[0].content[0].type, 'image');
-assert.match(sent.body.messages[0].content[1].text, /page 2/); assert.equal(sent.headers['x-api-key'], 'k');
+assert.equal(r.status, 200); assert.match(r.data, /X:1/);
+assert.equal(sent.url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse');
+assert.equal(sent.body.contents[0].parts[0].inlineData.mimeType, 'image/jpeg');
+assert.match(sent.body.contents[0].parts[1].text, /page 2/);
+assert.equal(sent.headers['x-goog-api-key'], 'k');
 
 // recordings
 const audio = new Uint8Array(1000).map((_, i) => i % 256);
@@ -116,4 +122,58 @@ assert.equal([...env.SCORES.store.keys()].filter((k) => k.includes(dup)).length,
 delete env.APP_PASSWORD; cookie = '';
 r = await call('GET', 'scores'); assert.equal(r.status, 200);
 r = await call('GET', 'scores/../meta'); assert.equal(r.status, 404);
+
+// MusicXML conversion retains the source and serves the resulting XML as a score.
+const scan = await call('POST', 'scores', { type: 'pdf', title: 'Duet' });
+const scanUrl = 'scores/' + scan.data.id;
+await call('PUT', scanUrl + '/source', '%PDF-fixture', { 'content-type': 'application/pdf', 'x-filename': 'duet.pdf' });
+const xml = '<score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list><part id="P1"><measure number="1"><note><rest/><duration>1</duration></note></measure></part></score-partwise>';
+const converted = await call('PUT', scanUrl, { type: 'musicxml', content: xml });
+assert.equal(converted.data.source, 'duet.pdf');
+assert.equal(converted.data.type, 'musicxml');
+assert.equal((await call('GET', scanUrl + '/file')).data, xml);
+assert.equal((await call('GET', scanUrl + '/source')).data, '%PDF-fixture');
+
+// Exercise the recognition request with a simulated model response.
+try {
+  globalThis.fetch = async (_url, request) => {
+    const prompt = JSON.parse(request.body);
+    assert.match(prompt.systemInstruction.parts[0].text, /MusicXML/);
+    assert.equal(prompt.contents[0].parts[0].inlineData.data, 'fixture');
+    assert.match(prompt.contents[0].parts.at(-1).text, /P1: Piano/);
+    return new Response(event(xml));
+  };
+  const response = await call('POST', 'transcribe', { mode: 'xml-page', images: [{ data: 'fixture', media_type: 'image/jpeg' }], parts: 'P1: Piano' });
+  assert.equal(response.status, 200);
+  assert.equal(JSON.parse(response.data.slice(6)).candidates[0].content.parts[0].text, xml);
+} finally {
+  globalThis.fetch = realFetch;
+}
+// Exercise all conversion modes through the Worker and the browser's stream reader.
+const { streamAI } = await import('../public/js/transcribe.js');
+const modes = ['first', 'continue', 'convert', 'xml-abc', 'xml-page'];
+try {
+  for (const mode of modes) {
+    const input = ['convert', 'xml-abc'].includes(mode) ? { text: 'score fixture' } : { images: [{ media_type: 'image/png', data: 'fixture' }] };
+    globalThis.fetch = async (url, init) => {
+      if (url === '/api/transcribe') {
+        return onRequest({ request: new Request('https://x.test/api/transcribe', init), env });
+      }
+      const body = JSON.parse(init.body);
+      assert.equal(body.contents[0].parts.some(p => !!p.inlineData), !!input.images);
+      assert.match(body.systemInstruction.parts[0].text, mode.startsWith('xml-') ? /MusicXML/ : /ABC/);
+      const thought = JSON.stringify({ candidates: [{ content: { parts: [{ thought: true, text: 'hidden' }, { text: 'a' }] } }] });
+      const payload = 'data: ' + thought + '\r\n\r\n' + event('b');
+      return new Response(new ReadableStream({ start(controller) {
+        const bytes = new TextEncoder().encode(payload);
+        controller.enqueue(bytes.slice(0, 15)); controller.enqueue(bytes.slice(15)); controller.close();
+      } }));
+    };
+    assert.equal(await streamAI({ mode, ...input }, () => {}), 'ab');
+  }
+  globalThis.fetch = async () => new Response('data: {"candidates":[{"finishReason":"MAX_TOKENS"}]}\n\n');
+  await assert.rejects(streamAI({}, () => {}), /recognition limit/);
+  globalThis.fetch = async () => new Response('data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n');
+  await assert.rejects(streamAI({}, () => {}), /incomplete/);
+} finally { globalThis.fetch = realFetch; }
 console.log('API: all tests passed');
